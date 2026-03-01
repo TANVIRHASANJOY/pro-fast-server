@@ -2,88 +2,189 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-
-// Stripe initialization using secret key from .env
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors({ origin: ["http://localhost:5173"], credentials: true }));
+app.use(
+  cors({
+    origin: ["http://localhost:5173"],
+    credentials: true,
+  })
+);
 app.use(express.json());
 
-// MongoDB Connection URI
+// MongoDB URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.gdayzte.mongodb.net/?retryWrites=true&w=majority`;
+
 const client = new MongoClient(uri, {
-  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
 });
 
 async function run() {
   try {
-    // Connect the client to the server
     await client.connect();
-    
     const db = client.db("parcelDB");
+
+    // Collections
+    const usersCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
-    const paymentCollection = db.collection("payments"); // Payment history collection
+    const paymentCollection = db.collection("payments");
+    const ridersCollection = db.collection("riders");
 
-    // --- PARCEL ROUTES ---
+    // =========================
+    // USERS ROUTES
+    // =========================
 
-    // 1. Create Parcel (Initial state: pending & unpaid)
-    app.post("/parcels", async (req, res) => {
-      const parcel = req.body;
-      parcel.status = "pending";
-      parcel.payment_status = "unpaid"; 
-      const result = await parcelCollection.insertOne(parcel);
+    // Create / Update user (Upsert)
+    app.put("/users", async (req, res) => {
+      try {
+        const user = req.body;
+        const filter = { email: user.email };
+        const updateDoc = {
+          $set: {
+            name: user.name,
+            email: user.email,
+            role: user.role || "user",
+            createdAt: user.createdAt || new Date(),
+          },
+        };
+        const options = { upsert: true };
+        const result = await usersCollection.updateOne(filter, updateDoc, options);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Get all users
+    app.get("/users", async (req, res) => {
+      const result = await usersCollection.find().toArray();
       res.send(result);
     });
 
-    // 2. Get Parcels (Filter by user email)
+    // Get single user by email
+    app.get("/users/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await usersCollection.findOne({ email });
+      res.send(result);
+    });
+
+    // =========================
+    // RIDERS ROUTES
+    // =========================
+
+    // Create rider application
+    app.post("/riders", async (req, res) => {
+      try {
+        const rider = req.body;
+        const newRider = {
+          ...rider,
+          status: "pending", // default
+          role: "rider",
+          createdAt: new Date(),
+        };
+        const result = await ridersCollection.insertOne(newRider);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Get all riders (admin)
+    app.get("/riders", async (req, res) => {
+      const status = req.query.status; // optional query: pending/approved
+      const filter = status ? { status } : {};
+      const result = await ridersCollection.find(filter).sort({ createdAt: -1 }).toArray();
+      res.send(result);
+    });
+
+    // Get single rider by email
+    app.get("/riders/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await ridersCollection.findOne({ email });
+      res.send(result);
+    });
+
+    // Approve rider
+    app.patch("/riders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status } = req.body; // status = 'approved' or 'rejected'
+        const result = await ridersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
+    // PARCEL ROUTES
+    // =========================
+
+    // Create parcel
+    app.post("/parcels", async (req, res) => {
+      try {
+        const parcel = { ...req.body, status: "pending", payment_status: "unpaid", createdAt: new Date() };
+        const result = await parcelCollection.insertOne(parcel);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Get parcels (optional email query)
     app.get("/parcels", async (req, res) => {
       const email = req.query.email;
-      let query = {};
-      if (email) query = { email: email }; 
-      const result = await parcelCollection.find(query).toArray();
+      const filter = email ? { email } : {};
+      const result = await parcelCollection.find(filter).sort({ createdAt: -1 }).toArray();
       res.send(result);
     });
 
-    // 3. Get Single Parcel (Required for checkout page details)
+    // Get single parcel
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
       const result = await parcelCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
-    // 4. Update Parcel Info (Edit)
+    // Update parcel
     app.patch("/parcels/:id", async (req, res) => {
       const id = req.params.id;
-      const filter = { _id: new ObjectId(id) };
-      const updatedDoc = { $set: { ...req.body } };
-      const result = await parcelCollection.updateOne(filter, updatedDoc);
+      const result = await parcelCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: req.body }
+      );
       res.send(result);
     });
 
-    // 5. Delete Parcel
+    // Delete parcel
     app.delete("/parcels/:id", async (req, res) => {
       const id = req.params.id;
       const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
+    // =========================
+    // PAYMENT ROUTES
+    // =========================
 
-    // --- PAYMENT & STRIPE ROUTES ---
-
-    // 6. Create Stripe Payment Intent
+    // Create payment intent
     app.post("/create-payment-intent", async (req, res) => {
-      const { price } = req.body;
-      if (!price || price <= 0) return res.status(400).send({ message: "Invalid Price" });
-      
-      const amount = Math.round(price * 100); // Stripe handles cents (100 cents = 1 USD/BDT)
-
       try {
+        const { price } = req.body;
+        const amount = Math.round(price * 100);
         const paymentIntent = await stripe.paymentIntents.create({
-          amount: amount,
+          amount,
           currency: "usd",
           payment_method_types: ["card"],
         });
@@ -93,47 +194,50 @@ async function run() {
       }
     });
 
-    // 7. Save Payment to DB & Update Parcel Status
-    // Flow: Success confirm hole frontend theke ekhane request ashbe
+    // Save payment and update parcel
     app.post("/payments", async (req, res) => {
-      const payment = req.body;
-      
-      // A. Save info to payments collection
-      const paymentResult = await paymentCollection.insertOne(payment);
+      try {
+        const payment = req.body;
+        const paymentResult = await paymentCollection.insertOne(payment);
 
-      // B. Update status in parcels collection
-      const query = { _id: new ObjectId(payment.parcelId) };
-      const updatedDoc = {
-        $set: {
-          payment_status: "paid",
-          status: "booked", // Changing status from pending to booked
-          transactionId: payment.transactionId
-        }
-      };
-      
-      const updateResult = await parcelCollection.updateOne(query, updatedDoc);
+        await parcelCollection.updateOne(
+          { _id: new ObjectId(payment.parcelId) },
+          {
+            $set: {
+              payment_status: "paid",
+              status: "booked",
+              transactionId: payment.transactionId,
+            },
+          }
+        );
 
-      res.send({ paymentResult, updateResult });
+        res.send(paymentResult);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
-    // 8. Get Payment History for a User
+    // Payment history by email
     app.get("/payment-history", async (req, res) => {
-        const email = req.query.email;
-        if (!email) return res.status(403).send({ message: "Forbidden Access" });
-        const query = { email: email };
-        const result = await paymentCollection.find(query).toArray();
-        res.send(result);
+      const email = req.query.email;
+      const result = await paymentCollection.find({ email }).sort({ createdAt: -1 }).toArray();
+      res.send(result);
     });
 
-    console.log("✅ Connected to MongoDB successfully!");
-  } catch (err) { 
-    console.error("❌ MongoDB Connection Error:", err); 
+    console.log("✅ MongoDB Connected Successfully");
+  } catch (error) {
+    console.error("❌ MongoDB Error:", error);
   }
 }
+
 run().catch(console.dir);
 
-app.get("/", (req, res) => res.send("Pro-Fast Server is Running"));
+// Root route
+app.get("/", (req, res) => {
+  res.send("🚀 Pro Fast Server Running");
+});
 
+// Listen
 app.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
