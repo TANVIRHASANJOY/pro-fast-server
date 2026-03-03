@@ -7,24 +7,23 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// =========================
 // Middleware
+// =========================
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173"], // update with your frontend domain
     credentials: true,
   })
 );
 app.use(express.json());
 
-// MongoDB URI
+// =========================
+// MongoDB Setup
+// =========================
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.gdayzte.mongodb.net/?retryWrites=true&w=majority`;
-
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
 });
 
 async function run() {
@@ -42,7 +41,7 @@ async function run() {
     // USERS ROUTES
     // =========================
 
-    // Create / Update user (Upsert)
+    // Upsert user
     app.put("/users", async (req, res) => {
       try {
         const user = req.body;
@@ -65,15 +64,41 @@ async function run() {
 
     // Get all users
     app.get("/users", async (req, res) => {
-      const result = await usersCollection.find().toArray();
-      res.send(result);
+      try {
+        const result = await usersCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
     // Get single user by email
     app.get("/users/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await usersCollection.findOne({ email });
-      res.send(result);
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+        res.send(user);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Toggle user role
+    app.patch("/users/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { role } = req.body;
+        if (!role) return res.status(400).send({ error: "Role is required" });
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role } }
+        );
+
+        res.send({ success: true, result });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
     // =========================
@@ -84,12 +109,7 @@ async function run() {
     app.post("/riders", async (req, res) => {
       try {
         const rider = req.body;
-        const newRider = {
-          ...rider,
-          status: "pending", // default
-          role: "rider",
-          createdAt: new Date(),
-        };
+        const newRider = { ...rider, status: "pending", role: "rider", createdAt: new Date() };
         const result = await ridersCollection.insertOne(newRider);
         res.send(result);
       } catch (error) {
@@ -97,31 +117,52 @@ async function run() {
       }
     });
 
-    // Get all riders (admin)
+    // Get riders (with optional status)
     app.get("/riders", async (req, res) => {
-      const status = req.query.status; // optional query: pending/approved
-      const filter = status ? { status } : {};
-      const result = await ridersCollection.find(filter).sort({ createdAt: -1 }).toArray();
-      res.send(result);
+      try {
+        const status = req.query.status;
+        const filter = status ? { status } : {};
+        const result = await ridersCollection.find(filter).sort({ createdAt: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
     // Get single rider by email
     app.get("/riders/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await ridersCollection.findOne({ email });
-      res.send(result);
+      try {
+        const email = req.params.email;
+        const rider = await ridersCollection.findOne({ email });
+        res.send(rider);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
-    // Approve rider
+    // Approve / Reject rider
     app.patch("/riders/:id", async (req, res) => {
       try {
         const id = req.params.id;
-        const { status } = req.body; // status = 'approved' or 'rejected'
-        const result = await ridersCollection.updateOne(
+        const { status } = req.body; // 'approved' or 'rejected'
+
+        const riderResult = await ridersCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { status } }
         );
-        res.send(result);
+
+        // If approved, update users collection
+        if (status === "approved") {
+          const rider = await ridersCollection.findOne({ _id: new ObjectId(id) });
+          if (rider?.email) {
+            await usersCollection.updateOne(
+              { email: rider.email },
+              { $set: { role: "rider" } }
+            );
+          }
+        }
+
+        res.send({ success: true, riderResult });
       } catch (error) {
         res.status(500).send({ error: error.message });
       }
@@ -131,7 +172,6 @@ async function run() {
     // PARCEL ROUTES
     // =========================
 
-    // Create parcel
     app.post("/parcels", async (req, res) => {
       try {
         const parcel = { ...req.body, status: "pending", payment_status: "unpaid", createdAt: new Date() };
@@ -142,43 +182,54 @@ async function run() {
       }
     });
 
-    // Get parcels (optional email query)
     app.get("/parcels", async (req, res) => {
-      const email = req.query.email;
-      const filter = email ? { email } : {};
-      const result = await parcelCollection.find(filter).sort({ createdAt: -1 }).toArray();
-      res.send(result);
+      try {
+        const email = req.query.email;
+        const filter = email ? { email } : {};
+        const result = await parcelCollection.find(filter).sort({ createdAt: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
-    // Get single parcel
     app.get("/parcels/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await parcelCollection.findOne({ _id: new ObjectId(id) });
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const parcel = await parcelCollection.findOne({ _id: new ObjectId(id) });
+        res.send(parcel);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
-    // Update parcel
     app.patch("/parcels/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await parcelCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: req.body }
-      );
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: req.body }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
-    // Delete parcel
     app.delete("/parcels/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
-      res.send(result);
+      try {
+        const id = req.params.id;
+        const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
     // =========================
     // PAYMENT ROUTES
     // =========================
 
-    // Create payment intent
     app.post("/create-payment-intent", async (req, res) => {
       try {
         const { price } = req.body;
@@ -194,7 +245,6 @@ async function run() {
       }
     });
 
-    // Save payment and update parcel
     app.post("/payments", async (req, res) => {
       try {
         const payment = req.body;
@@ -203,11 +253,7 @@ async function run() {
         await parcelCollection.updateOne(
           { _id: new ObjectId(payment.parcelId) },
           {
-            $set: {
-              payment_status: "paid",
-              status: "booked",
-              transactionId: payment.transactionId,
-            },
+            $set: { payment_status: "paid", status: "booked", transactionId: payment.transactionId },
           }
         );
 
@@ -217,11 +263,14 @@ async function run() {
       }
     });
 
-    // Payment history by email
     app.get("/payment-history", async (req, res) => {
-      const email = req.query.email;
-      const result = await paymentCollection.find({ email }).sort({ createdAt: -1 }).toArray();
-      res.send(result);
+      try {
+        const email = req.query.email;
+        const result = await paymentCollection.find({ email }).sort({ createdAt: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
     });
 
     console.log("✅ MongoDB Connected Successfully");
@@ -238,6 +287,4 @@ app.get("/", (req, res) => {
 });
 
 // Listen
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
