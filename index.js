@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 5000;
 // =========================
 app.use(
   cors({
-    origin: ["http://localhost:5173"], // update with your frontend domain
+    origin: ["http://localhost:5173"],
     credentials: true,
   })
 );
@@ -22,6 +22,7 @@ app.use(express.json());
 // MongoDB Setup
 // =========================
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.gdayzte.mongodb.net/?retryWrites=true&w=majority`;
+
 const client = new MongoClient(uri, {
   serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
 });
@@ -31,17 +32,15 @@ async function run() {
     await client.connect();
     const db = client.db("parcelDB");
 
-    // Collections
     const usersCollection = db.collection("users");
     const parcelCollection = db.collection("parcels");
     const paymentCollection = db.collection("payments");
     const ridersCollection = db.collection("riders");
+    const cashoutCollection = db.collection("cashouts");
 
     // =========================
     // USERS ROUTES
     // =========================
-
-    // Upsert user
     app.put("/users", async (req, res) => {
       try {
         const user = req.body;
@@ -62,7 +61,6 @@ async function run() {
       }
     });
 
-    // Get all users
     app.get("/users", async (req, res) => {
       try {
         const result = await usersCollection.find().toArray();
@@ -72,7 +70,6 @@ async function run() {
       }
     });
 
-    // Get single user by email
     app.get("/users/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -83,18 +80,23 @@ async function run() {
       }
     });
 
-    // Toggle user role
+    app.get("/users/rider/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+        res.send({ rider: user?.role === "rider" });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
     app.patch("/users/:id", async (req, res) => {
       try {
         const id = req.params.id;
         const { role } = req.body;
         if (!role) return res.status(400).send({ error: "Role is required" });
 
-        const result = await usersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { role } }
-        );
-
+        const result = await usersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { role } });
         res.send({ success: true, result });
       } catch (error) {
         res.status(500).send({ error: error.message });
@@ -104,8 +106,6 @@ async function run() {
     // =========================
     // RIDERS ROUTES
     // =========================
-
-    // Create rider application
     app.post("/riders", async (req, res) => {
       try {
         const rider = req.body;
@@ -117,7 +117,6 @@ async function run() {
       }
     });
 
-    // Get riders (with optional status)
     app.get("/riders", async (req, res) => {
       try {
         const status = req.query.status;
@@ -129,7 +128,6 @@ async function run() {
       }
     });
 
-    // Get single rider by email
     app.get("/riders/:email", async (req, res) => {
       try {
         const email = req.params.email;
@@ -140,26 +138,15 @@ async function run() {
       }
     });
 
-    // Approve / Reject rider
     app.patch("/riders/:id", async (req, res) => {
       try {
         const id = req.params.id;
-        const { status } = req.body; // 'approved' or 'rejected'
+        const { status } = req.body;
+        const riderResult = await ridersCollection.updateOne({ _id: new ObjectId(id) }, { $set: { status } });
 
-        const riderResult = await ridersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { status } }
-        );
-
-        // If approved, update users collection
         if (status === "approved") {
           const rider = await ridersCollection.findOne({ _id: new ObjectId(id) });
-          if (rider?.email) {
-            await usersCollection.updateOne(
-              { email: rider.email },
-              { $set: { role: "rider" } }
-            );
-          }
+          if (rider?.email) await usersCollection.updateOne({ email: rider.email }, { $set: { role: "rider" } });
         }
 
         res.send({ success: true, riderResult });
@@ -171,7 +158,6 @@ async function run() {
     // =========================
     // PARCEL ROUTES
     // =========================
-
     app.post("/parcels", async (req, res) => {
       try {
         const parcel = { ...req.body, status: "pending", payment_status: "unpaid", createdAt: new Date() };
@@ -206,10 +192,7 @@ async function run() {
     app.patch("/parcels/:id", async (req, res) => {
       try {
         const id = req.params.id;
-        const result = await parcelCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: req.body }
-        );
+        const result = await parcelCollection.updateOne({ _id: new ObjectId(id) }, { $set: req.body });
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: error.message });
@@ -227,18 +210,105 @@ async function run() {
     });
 
     // =========================
+    // ASSIGN RIDER
+    // =========================
+    app.patch("/assign-rider/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { riderEmail } = req.body;
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { riderEmail, status: "picked", pickedAt: new Date() } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
+    // RIDER PARCELS
+    // =========================
+    app.get("/rider-parcels", async (req, res) => {
+      try {
+        const email = req.query.email;
+        const result = await parcelCollection.find({ riderEmail: email, status: "picked" }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
+    // DELIVER PARCEL
+    // =========================
+    app.patch("/parcel-delivered/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await parcelCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "delivered", deliveredAt: new Date() } }
+        );
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
+    // RIDER COMPLETED DELIVERIES
+    // =========================
+    app.get("/rider/completed-deliveries/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await parcelCollection
+          .find({ riderEmail: email, status: "delivered" })
+          .sort({ deliveredAt: -1 })
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
+    // CASHOUT ROUTE
+    // =========================
+    app.post("/cashout", async (req, res) => {
+      try {
+        const { email, amount } = req.body;
+        const cashout = { email, amount, status: "pending", createdAt: new Date() };
+        const result = await cashoutCollection.insertOne(cashout);
+        res.send({ success: true, insertedId: result.insertedId });
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    app.get("/cashout/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await cashoutCollection.find({ email }).sort({ createdAt: -1 }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // =========================
     // PAYMENT ROUTES
     // =========================
-
     app.post("/create-payment-intent", async (req, res) => {
       try {
         const { price } = req.body;
         const amount = Math.round(price * 100);
+
         const paymentIntent = await stripe.paymentIntents.create({
           amount,
           currency: "usd",
           payment_method_types: ["card"],
         });
+
         res.send({ clientSecret: paymentIntent.client_secret });
       } catch (error) {
         res.status(500).send({ error: error.message });
@@ -252,9 +322,7 @@ async function run() {
 
         await parcelCollection.updateOne(
           { _id: new ObjectId(payment.parcelId) },
-          {
-            $set: { payment_status: "paid", status: "booked", transactionId: payment.transactionId },
-          }
+          { $set: { payment_status: "paid", transactionId: payment.transactionId } }
         );
 
         res.send(paymentResult);
@@ -286,5 +354,4 @@ app.get("/", (req, res) => {
   res.send("🚀 Pro Fast Server Running");
 });
 
-// Listen
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
